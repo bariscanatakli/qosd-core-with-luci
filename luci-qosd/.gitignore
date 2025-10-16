@@ -1,0 +1,55 @@
+# OS/Editor artifacts
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+*~
+.#*
+*.swp
+*.swo
+*.swm
+.netrwhist
+.idea/
+.vscode/
+.fleet/
+.history
+*.code-workspace
+
+# Temporary/build
+tmp/
+tmp/**
+dist/
+build/
+coverage/
+
+# Archives and packages
+*.ipk
+*.ipk.sha256sum
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.zip
+*.7z
+
+# LuCI/OpenWrt specifics
+*.lmo
+.pc/
+.quilt/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Tags and tooling
+tags
+TAGS
+cscope.*
+compile_commands.json
+
+# Python (if any tooling/scripts)
+__pycache__/
+*.pyc
+*.pyo

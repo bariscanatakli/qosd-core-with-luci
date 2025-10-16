@@ -1,0 +1,18 @@
+#!/bin/sh
+# Ensure /ubus endpoint is active and socket path is correct
+uci -q get uhttpd.main || uci set uhttpd.main=uhttpd
+# attach ubus plugin
+uci -q add_list uhttpd.main.plugin='/ubus=/usr/lib/uhttpd_ubus.so'
+uci set uhttpd.main.ubus_socket='/var/run/ubus/ubus.sock'
+uci commit uhttpd
+
+# Restart web server so WS /ubus becomes active
+/etc/init.d/uhttpd restart >/dev/null 2>&1 || true
+
+# LuCI cache reset so our menu appears
+rm -rf /tmp/luci-*
+
+# Enable & start daemon on install
+/etc/init.d/qosd enable >/dev/null 2>&1 || true
+/etc/init.d/qosd start  >/dev/null 2>&1 || true
+exit 0

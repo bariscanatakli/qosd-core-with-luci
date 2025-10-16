@@ -1,0 +1,22 @@
+<div class="cbi-section">
+  <h2>Live Traffic Classification</h2>
+  <table id="flows" class="table">
+    <thead><tr><th>Type</th><th>Rate (pkt/s)</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+<script>
+(function(){
+  const ws = new WebSocket("ws://" + window.location.host + "/ubus");
+  ws.onmessage = e => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "qosd.update") {
+        const d = JSON.parse(msg.data);
+        document.querySelector("#flows tbody").innerHTML =
+          `<tr><td>${d.type}</td><td>${d.pkt_rate.toFixed(2)}</td></tr>`;
+      }
+    } catch (err) { console.error(err); }
+  };
+})();
+</script>

@@ -1,0 +1,10 @@
+{
+  "streaming": { "policy_action": "boost", "priority": "medium", "dscp": "AF41" },
+  "gaming": { "policy_action": "boost", "priority": "high", "dscp": "CS6" },
+  "voip": { "policy_action": "boost", "priority": "high", "dscp": "EF" },
+  "work": { "policy_action": "boost", "priority": "medium", "dscp": "AF21" },
+  "bulk": { "policy_action": "throttle", "priority": "low", "dscp": "CS1" },
+  "iot": { "policy_action": "observe", "priority": "low", "dscp": "CS2" },
+  "latency": { "policy_action": "boost", "priority": "medium", "dscp": "CS5" },
+  "other": { "policy_action": "observe", "priority": "normal", "dscp": "CS0" }
+}

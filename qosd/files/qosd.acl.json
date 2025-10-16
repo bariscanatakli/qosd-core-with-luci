@@ -1,0 +1,18 @@
+{
+  "qosd": {
+    "read": {
+      "ubus": {
+        "qosd": ["classify"]
+      }
+    },
+    "write": {
+      "uci": {
+        "qosd": ["read", "write"]
+      },
+      "ubus": {
+        "service": ["restart"],
+        "system": ["reload_config"]
+      }
+    }
+  }
+}

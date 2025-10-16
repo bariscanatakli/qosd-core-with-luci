@@ -1,0 +1,61 @@
+# OpenWrt/SDK/Buildroot çıktı klasörleri
+bin/
+build_dir/
+staging_dir/
+tmp/
+dl/
+
+# Komut çıktıları ve paket indeksleri
+Packages
+Packages.gz
+Packages.manifest
+index.json
+
+# Derleme çıktıları
+*.o
+*.a
+*.so
+*.so.*
+*.la
+*.lo
+*.obj
+*.d
+
+# CMake/meson/diğer yerel build dizinleri
+build/
+cmake-build-*/
+
+# Editör/IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Geçici/OS dosyaları
+*.swp
+*.swo
+*~
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Python önbellekleri (bazı araçlar için)
+__pycache__/
+*.pyc
+
+# Autotools yardımcıları (yerel denemelerde oluşabilir)
+aclocal.m4
+autom4te.cache/
+ltmain.sh
+libtool
+depcomp
+install-sh
+missing
+config.log
+config.status
+configure
+Makefile.in
+m4/
+
+/feeds
+/toolchain
+/kernel

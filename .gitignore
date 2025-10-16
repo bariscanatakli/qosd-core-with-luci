@@ -1,0 +1,103 @@
+# OS/Editor
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+*~
+.#*
+*.swp
+*.swo
+*.swm
+.netrwhist
+.idea/
+.vscode/
+.fleet/
+.history
+*.code-workspace
+
+# Logs and temp
+*.log
+logs/
+tmp/
+*.tmp
+coverage/
+tags
+TAGS
+cscope.*
+compile_commands.json
+
+# Node.js (if used under collector/ or elsewhere)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python caches (if any tooling/scripts)
+__pycache__/
+*.pyc
+*.pyo
+
+# Docker/Compose env overrides
+.env
+.env.local
+.env.*.local
+docker-compose.override.yml
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.run.xml
+*.nav
+*.snm
+*.vrb
+
+# OpenSearch / data mounts
+os-data/
+opensearch-data/
+data/
+
+# Fluent Bit runtime
+fluent-bit/logs/
+fluent-bit/state/
+
+# OpenWrt / package build artifacts
+bin/
+build_dir/
+staging_dir/
+dl/
+# Keep repo-level tmp/ ignored, but subpackages may also have their own:
+qosd/tmp/
+qosd/build/
+qosd/bin/
+luci-qosd/tmp/
+luci-qosd/dist/
+
+# Archives / packages
+*.ipk
+*.ipk.sha256sum
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.zip
+*.7z
+
+# C/C++ build outputs
+*.o
+*.a
+*.so
+*.so.*
+*.la
+*.lo
+*.obj
+*.d

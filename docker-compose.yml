@@ -1,0 +1,132 @@
+version: '3.8'
+
+services:
+  # OpenSearch: persists telemetry indices and exposes REST API for analytics.
+  opensearch-node:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: opensearch-node
+    restart: unless-stopped
+    environment:
+      - cluster.name=opensearch-cluster
+      - node.name=opensearch-node
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms320m -Xmx320m"
+      - "DISABLE_SECURITY_PLUGIN=true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"  # REST + ingest
+      - "9600:9600"  # Performance analyzer
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - telemetry
+
+  # Dashboards: visualization tier referencing OpenSearch indices.
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.13.0
+    container_name: opensearch-dashboards
+    restart: unless-stopped
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch-node:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+    depends_on:
+      opensearch-node:
+        condition: service_healthy
+    mem_limit: 512m
+    networks:
+      - telemetry
+
+  # Fluent Bit: telemetry gateway ingesting router + container logs.
+  fluent-bit:
+    image: fluent/fluent-bit:2.1.10-debug
+    container_name: fluent-bit
+    restart: unless-stopped
+    volumes:
+      - ./fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+    ports:
+      - "24224:24224"        # Fluent Forward TCP
+      - "24224:24224/udp"    # Fluent Forward UDP
+      - "5514:5514/udp"      # Syslog UDP
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2020/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      opensearch-node:
+        condition: service_healthy
+      collector-api:
+        condition: service_started
+    networks:
+      - telemetry
+
+  collector-api:
+    image: node:20-alpine
+    container_name: collector-api
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      - PORT=4000
+    volumes:
+      - ./collector:/app:ro
+    command: ["node", "server.js"]
+    ports:
+      - "4000:4000"
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "-", "http://localhost:4000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - telemetry
+
+  # Log Generator: synthetic workload demonstrating end-to-end flow.
+  log-generator:
+    image: alpine:latest
+    container_name: log-generator
+    restart: unless-stopped
+    command: >
+      sh -c '
+        while true; do
+          ts=`date -u +%Y-%m-%dT%H:%M:%SZ`;
+          echo "{\"level\": \"info\", \"message\": \"Bu bir test logudur.\", \"service\": \"generator-app\", \"timestamp\": \"$$ts\", \"router\": \"simulated-openwrt\"}";
+          sleep 5;
+        done
+      '
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        tag: app.log.generator
+    depends_on:
+      fluent-bit:
+        condition: service_healthy
+    mem_limit: 64m
+    networks:
+      - telemetry
+
+volumes:
+  opensearch-data:
+    driver: local
+
+networks:
+  telemetry:
+    name: telemetry_observability

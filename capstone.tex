@@ -1,0 +1,375 @@
+% ====================================================================================
+% Technical Whitepaper Template — qosd / OpenWrt / Telemetry / AI (Edge-Cloud)
+% Author: Barış Can Ataklı (replace)
+% License: CC-BY 4.0 (replace if needed)
+% Compile: pdflatex whitepaper.tex (twice for ToC)
+% ====================================================================================
+\documentclass[11pt,a4paper]{article}
+
+% ---- Encoding & Language (Turkish) ----
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[turkish]{babel}
+
+% ---- Layout ----
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\setstretch{1.1}
+\usepackage{titlesec}
+\titleformat{\section}{\large\bfseries}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+\usepackage{enumitem}
+\setlist{nosep}
+
+% ---- Graphics & Colors ----
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{xcolor}
+\definecolor{accent}{RGB}{2,108,223}
+\definecolor{softgray}{gray}{0.2}
+\usepackage{caption}
+\captionsetup{labelfont=bf}
+
+% ---- TikZ for architecture diagrams ----
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shadows,fit}
+
+% ---- Tables & Code ----
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{listings}
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\small,
+  frame=single,
+  breaklines=true,
+  tabsize=2,
+  showstringspaces=false
+}
+\lstset{style=code}
+
+% ---- References (simple) ----
+% For quick use we embed a manual thebibliography. 
+% For large projects, switch to biblatex/biber later.
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=accent,
+  urlcolor=accent,
+  citecolor=accent
+}
+
+% ---- Title ----
+\newcommand{\projecttitle}{Persona-Aware Dynamic QoS on OpenWrt: Edge–Cloud Telemetry and AI-Assisted Policy}
+\newcommand{\shorttitle}{qosd Whitepaper}
+
+\begin{document}
+
+% ====================================================================================
+% Title Page
+% ====================================================================================
+\begin{titlepage}
+  \centering
+  {\Large \textbf{\projecttitle}\par}
+  \vspace{8pt}
+  {\large Teknik Whitepaper (v0.1)\par}
+  \vspace{18pt}
+  \textbf{Yazar:} Barış Can Ataklı \hfill \textbf{Tarih:} \today
+
+  \vfill
+  \begin{minipage}{0.9\textwidth}
+  \textbf{Özet} — Bu whitepaper, OpenWrt üzerinde geliştirilen \texttt{qosd} daemon'u ile
+  persona-temelli dinamik QoS yönetimini; telemetri (Fluent Bit $\rightarrow$ OpenSearch) ve
+  kenar (edge) üzerinde çalışan hafif yapay zekâ çıkarımı (inference) ile birleştiren uçtan uca
+  mimariyi tanımlar. Sistem, CAKE tabanlı sıra yönetimi, çok katmanlı sınıflandırma, geçmiş veri
+  analizleri ve politikaların gerçek zamanlı adaptasyonu ile düşük gecikme/kararlılık hedefler.
+  \end{minipage}
+
+  \vspace{12pt}
+  \textbf{Anahtar Kelimeler:} OpenWrt, QoS, CAKE, Edge AI, Telemetry, OpenSearch, Fluent Bit, DSCP
+
+  \vfill
+  \textcolor{softgray}{\shorttitle} \\
+  \textcolor{softgray}{Bu belge, proje tez/raporuna temel olacak teknik çerçeveyi sunar.}
+\end{titlepage}
+
+% ====================================================================================
+\tableofcontents
+\newpage
+
+% ====================================================================================
+\section{Giriş}
+Tipik ev/ofis ağlarında, oyun/streaming/VoIP/bulk gibi farklı trafik sınıflarının aynı anda
+adil ve gecikme-duyarlı yönetimi zordur. OpenWrt ekosistemi, CAKE/fq\_codel gibi AQM
+yaklaşımları ile bufferbloat'ı azaltır; ancak \emph{statik} kurulumların günümüz trafiğine
+uyumu sınırlıdır. Bu whitepaper, \texttt{qosd} ile \textbf{persona-aware}, \textbf{telemetry-driven} ve
+\textbf{AI-assisted} bir QoS mimarisini ortaya koyar.
+
+\paragraph{Hedefler:}
+\begin{itemize}
+  \item Gecikme/jitter düşüşü ve stabil DSCP temelli önceliklendirme,
+  \item Gerçek-zaman \emph{ve} geçmiş verilerle politika adaptasyonu,
+  \item Düşük kaynaklı router üzerinde çalışabilen \emph{quantized} AI çıkarımı,
+  \item LuCI/standalone dashboard ile gözlemlenebilirlik ve kontrol.
+\end{itemize}
+
+% ====================================================================================
+\section{Sistem Genel Bakış ve Gereksinimler}
+\subsection{Bileşenler}
+\begin{itemize}
+  \item \textbf{qosd-core (router)}: Trafik sınıflandırma, DSCP işaretleme, CAKE/nftables uygulama.
+  \item \textbf{Telemetry Agent (router)}: Fluent Bit ile JSON log $\rightarrow$ OpenSearch.
+  \item \textbf{Collector/API (sunucu)}: REST endpoint, indeksleme, politika yayılımı.
+  \item \textbf{OpenSearch/Kibana (sunucu)}: Kalıcı metrik depolama, analiz, dashboard.
+  \item \textbf{AI Model Server (sunucu/edge)}: Eğitim sunucuda; çıkarım router’da (TFLite).
+  \item \textbf{LuCI/Standalone UI}: Yerel yapılandırma, canlı grafikler, geçmiş sorguları.
+\end{itemize}
+
+\subsection{Fonksiyonel Gereksinimler (özet)}
+\begin{enumerate}[label=FR\arabic*:]
+  \item Persona atama (Gaming/Streaming/VoIP/Bulk/IoT).
+  \item Çok-katmanlı sınıflandırma (port, akış istatistiği, DNS ipuçları).
+  \item Adaptif politika: gecikme eşikleri, minimum garanti, boost/throttle.
+  \item Gerçek-zaman ve tarihsel telemetri; dashboard görselleştirme.
+\end{enumerate}
+
+\subsection{Kısıtlar ve Hedef Donanım}
+\begin{itemize}
+  \item Hedef: MT7981B (AX3000T), 1.3\,GHz ARM64, 256\,MB RAM.
+  \item QoS ek yük hedefi $<\!20\%$ CPU, $<\!64$\,MB RAM.
+  \item Telemetry agent: 4–8\,MB RAM (Fluent Bit).
+\end{itemize}
+
+% ====================================================================================
+\section{Mimari}
+\subsection{Uçtan Uca Veri Akışı}
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    node distance=1.5cm,
+    box/.style={draw, rounded corners, align=center, fill=white, drop shadow, minimum width=3.6cm, minimum height=1.2cm},
+    arrow/.style={-Latex, thick, color=accent}
+  ]
+    \node[box] (clients) {İstemciler\\(PC/TV/IoT)};
+    \node[box, right=2.2cm of clients] (qosd) {\textbf{qosd-core}\\CAKE/DSCP};
+    \node[box, right=2.2cm of qosd] (agent) {Fluent Bit\\(Tail JSON)};
+    \node[box, right=2.2cm of agent] (collector) {Collector/API\\(REST Ingest)};
+    \node[box, below=1.5cm of collector] (os) {OpenSearch\\+ Kibana};
+    \node[box, above=1.5cm of collector] (ai) {AI Model Server\\(Train/Export)};
+    \node[box, below=1.5cm of qosd] (luci) {LuCI/UI\\(Yerel Kontrol)};
+
+    \draw[arrow] (clients) -- node[above]{Trafik} (qosd);
+    \draw[arrow] (qosd) -- node[above]{JSON Metrikler} (agent);
+    \draw[arrow] (agent) -- node[above]{HTTP POST} (collector);
+    \draw[arrow] (collector) -- (os);
+    \draw[arrow] (collector) -- (ai);
+    \draw[arrow] (ai) |- node[pos=0.25, right]{Politika Önerileri} (qosd);
+    \draw[arrow] (qosd) -- (luci);
+    \draw[arrow] (os) -| node[pos=0.25, left]{Geçmiş Sorgu} (luci);
+  \end{tikzpicture}
+  \caption{Uçtan uca mimari ve veri akışı.}
+\end{figure}
+
+\subsection{QoS Kontrol Döngüsü}
+\begin{enumerate}
+  \item \textbf{Ölçüm}: RTT/jitter/throughput, persona ve DSCP istatistikleri toplanır.
+  \item \textbf{Analiz}: Eşikler ve hedefler ile kıyaslanır (ör. gaming RTT $<\!35$\,ms).
+  \item \textbf{Karar}: Min-garanti/boost/throttle ayarları belirlenir.
+  \item \textbf{Uygulama}: CAKE tin/flow parametreleri ve nftables mark'ları güncellenir.
+  \item \textbf{Doğrulama}: Etki metriklere yansır; döngü kararlılık için histerezis içerir.
+\end{enumerate}
+
+% ====================================================================================
+\section{Uygulama Tasarımı}
+\subsection{UCI Konfigürasyon (örnek)}
+\begin{lstlisting}[language=bash,caption={/etc/config/qosd örnek şema}]
+config persona 'gaming_pc'
+  option mac 'AA:BB:CC:DD:EE:FF'
+  option type 'gaming'
+  option priority 'high'
+  option bandwidth_share '30'
+
+config policy 'default'
+  option adaptive '1'
+  option gaming_latency_target '35'
+  option streaming_min_share '25'
+\end{lstlisting}
+
+\subsection{ubus API (öneri)}
+\begin{lstlisting}[language=json,caption={ubus API yüzeyi (öneri)}]
+{
+  "qos.status": { "description": "Live QoS status/metrics" },
+  "qos.personas": { "methods": ["list","add","update","delete"] },
+  "qos.policies": { "methods": ["get_active","set_active","boost_device"] }
+}
+\end{lstlisting}
+
+\subsection{Telemetry Log Formatı}
+\begin{lstlisting}[language=json,caption={qosd JSON telemetri satırı (newline-delimited)}]
+{"ts":"2025-10-14T19:10:00Z","device_mac":"AA:BB:..","persona":"gaming",
+ "latency_ms":27.3,"jitter_ms":6.8,"bandwidth_kbps":8420,"dscp":"EF"}
+\end{lstlisting}
+
+% ====================================================================================
+\section{Dağıtım ve Operasyon}
+\subsection{Router (OpenWrt)}
+\begin{itemize}
+  \item \texttt{opkg install qosd luci-app-qosd fluent-bit}
+  \item \texttt{/etc/init.d/qosd enable \&\& /etc/init.d/qosd start}
+  \item \texttt{/etc/init.d/fluent-bit enable \&\& /etc/init.d/fluent-bit start}
+\end{itemize}
+
+\subsection{Sunucu (OpenSearch + Dashboards)}
+\begin{itemize}
+  \item Tek düğüm OpenSearch, 9200/tcp; Dashboards (Kibana eşleniği) 5601/tcp.
+  \item Collector/API: FastAPI/Flask (opsiyonel), ya da Fluent Bit doğrudan OpenSearch HTTP output.
+\end{itemize}
+
+\subsection{Güvenlik}
+\begin{itemize}
+  \item Router $\rightarrow$ Sunucu trafiği: HTTPS + Token.
+  \item Sunucuda RBAC/Index-level security (üretimde \emph{security plugin} açık).
+\end{itemize}
+
+% ====================================================================================
+\section{Performans Bütçesi ve Hedefler}
+\begin{table}[H]
+  \centering
+  \begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Bileşen} & \textbf{CPU} & \textbf{RAM} \\
+    \midrule
+    qosd-core (idle) & $<\!5\%$ & $<\!10$\,MB \\
+    qosd-core (peak) & $<\!20\%$ & $<\!32$\,MB \\
+    Fluent Bit       & $<\!5\%$  & 4–8\,MB \\
+    \bottomrule
+  \end{tabular}
+  \caption{Hedef kaynak kullanımı (AX3000T / MT7981B).}
+\end{table}
+
+% ====================================================================================
+\section{Değerlendirme Planı (Özet)}
+\subsection{Senaryolar}
+\begin{enumerate}
+  \item Oyun altında yük (eşzamanlı streaming + bulk).
+  \item Video konferans önceliği (Zoom/Teams) + arka plan backup.
+  \item Karışık hane kullanımı (gaming/streaming/web/IoT).
+\end{enumerate}
+
+\subsection{Metrikler}
+RTT, jitter, paket kaybı, persona başına throughput, adaptasyon süresi, CAKE tin istatistikleri.
+
+% ====================================================================================
+\section{Yol Haritası}
+\begin{enumerate}
+  \item \textbf{MVP}: Persona $\rightarrow$ CAKE eşleme, temel ubus.
+  \item \textbf{Beta}: Telemetry pipeline, dashboard grafikler.
+  \item \textbf{RC}: Edge AI çıkarımı (TFLite), adaptif eşik öğrenimi.
+  \item \textbf{Prod}: Çoklu router (controller), güvenlik sertleştirme.
+\end{enumerate}
+
+% ====================================================================================
+\section{Sonuç}
+Bu mimari, düşük maliyetli yönlendiricilerde dahi \emph{telemetry-aware} ve \emph{AI-assisted}
+bir QoS sağlar. Kenarda (edge) çalışan çıkarım, bağlantı olmasa bile yerel kararı mümkün kılar;
+sunucudaki geçmiş veriler ise politika optimizasyonunu sürekli iyileştirir.
+
+% ====================================================================================
+\appendix
+\section*{Ekler}
+
+\section{Fluent Bit Konfigürasyonu (OpenWrt)}
+\begin{lstlisting}[language=ini,caption={/etc/fluent-bit.conf}]
+[SERVICE]
+  Flush        5
+  Daemon       Off
+  Log_Level    info
+
+[INPUT]
+  Name         tail
+  Path         /var/log/qosd_metrics.log
+  Tag          qosd
+  Parser       json
+  Refresh_Interval 2
+
+[OUTPUT]
+  Name         http
+  Match        qosd
+  Host         192.168.1.10      # OpenSearch host
+  Port         9200
+  URI          /qosd-metrics/_doc/
+  Format       json_stream
+  Retry_Limit  False
+\end{lstlisting}
+
+\section{OpenSearch Docker Compose (Sunucu)}
+\begin{lstlisting}[language=yaml,caption={docker-compose.yml}]
+version: '3.9'
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: opensearch
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+    ports:
+      - "9200:9200"
+    volumes:
+      - ./os-data:/usr/share/opensearch/data
+
+  dashboards:
+    image: opensearchproject/opensearch-dashboards:2.13.0
+    container_name: dashboards
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+    ports:
+      - "5601:5601"
+    depends_on:
+      - opensearch
+\end{lstlisting}
+
+\section{UCI Örneği}
+\begin{lstlisting}[language=bash]
+config persona 'stream_tv'
+  option mac '11:22:33:44:55:66'
+  option type 'streaming'
+  option priority 'medium'
+
+config policy 'gaming_household'
+  option adaptive '1'
+  option gaming_latency_target '30'
+  option bulk_max_share '10'
+\end{lstlisting}
+
+\section{Makefile Parçası (OpenWrt Paket)}
+\begin{lstlisting}[language=make]
+define Package/qosd
+  SECTION:=net
+  CATEGORY:=Network
+  SUBMENU:=QoS
+  TITLE:=Persona-aware QoS daemon
+  DEPENDS:=+libubus +libuci +libjson-c
+endef
+\end{lstlisting}
+
+% ====================================================================================
+\begin{thebibliography}{9}
+\bibitem{codel}
+K. Nichols and V. Jacobson, ``Controlling Queue Delay,'' \emph{Communications of the ACM}, 55(7), 2012.
+
+\bibitem{diffserv}
+S. Blake et al., ``An Architecture for Differentiated Services,'' \emph{RFC 2475}, 1998.
+
+\bibitem{ml-traffic}
+T. T. T. Nguyen and G. Armitage, ``A Survey of Techniques for Internet Traffic Classification using ML,'' \emph{IEEE Comms Surveys}, 2008.
+
+\bibitem{cake}
+OpenWrt Project, ``CAKE \& SQM Scripts,'' Online Docs.
+
+\bibitem{ebpf-edge}
+M. Popescu et al., ``eBPF for Adaptive Network Telemetry on Edge Routers,'' \emph{IEEE Access}, 2024.
+
+\bibitem{opensearch}
+OpenSearch Project Docs, ``HTTP Bulk \& Index APIs,'' 2024.
+\end{thebibliography}
+
+\end{document}
