@@ -4,27 +4,59 @@
 
 This repository packages an end-to-end observability pipeline for the capstone project on **Network Observability and Telemetry Automation**. The stack bridges OpenWrt edge routers with an Ubuntu logging gateway that runs Fluent Bit, OpenSearch, and OpenSearch Dashboards inside Docker Compose. Runtime profiles target ≤ 512 MB per container for the lightweight services (Fluent Bit, Dashboards, generators); OpenSearch is capped at 768 MB with a tuned JVM heap (320 MB) to keep the node responsive under constrained lab conditions.
 
-### Architecture Overview
+## Network topology
 
 ```mermaid
 flowchart LR
-    subgraph Edge["OpenWrt Router"]
-        syslog[/syslogd or logger/]
-        qosd[qosd module]
+    subgraph WindowsHost["Windows Host"]
+        PS["PowerShell SSH Tunnel<br/>8080→OpenWrt:80<br/>8443→OpenWrt:443"]
     end
-    subgraph Gateway["Ubuntu Logging Gateway"]
-        FB[Fluent Bit\nForward+Syslog inputs]
-        COL[Collector API\nPolicy + Enrichment]
-        OS[(OpenSearch\nmy-app-logs-*)]
-        Dash[OpenSearch Dashboards]
+
+    subgraph UbuntuVM["VirtualBox Guest: Ubuntu Server"]
+        ENP0S3["enp0s3<br/>10.10.1.104/24"]
+        TAPWAN["tap-wan<br/>10.200.0.1/24"]
+        TAPLAN["tap-lan"]
+        TAPCLIENT["tap-client"]
+        VETHCLIENT["veth-client<br/>(namespace)"]
+        BRLAN["br-lan-host<br/>192.168.10.254/24"]
+
+        ENP0S3 <-->|NAT / Internet| ISP["Home Router / Internet"]
+        TAPWAN -.->|NAT via enp0s3| ISP
+        TAPLAN --> BRLAN
+        TAPCLIENT -.->|optional| BRLAN
+        VETHCLIENT --> BRLAN
     end
-    syslog -- UDP 24224 / 5514 --> FB
-    qosd -- JSON metrics --> FB
-    FB -- Bulk ingest --> COL
-    COL -- Fan-out --> OS
-    OS -- Index pattern --> Dash
-    Dash -- Visualizations --> Analysts
-    COL -- Persona policies --> qosd
+
+    subgraph OpenWrtVM["QEMU VM: OpenWrt"]
+        WAN["eth0 (virtio)<br/>10.200.0.2/24<br/>proto static"]
+        LAN["br-lan (eth1)<br/>192.168.10.1/24<br/>DHCP server"]
+        QoSD["qosd daemon<br/>syslog → Fluent Bit"]
+    end
+
+    subgraph NetNamespace["lanclient netns (Ubuntu)"]
+        VETHNS["veth-ns<br/>DHCP 192.168.10.x"]
+        TestApps["curl / iperf / wget"]
+    end
+
+    subgraph DockerStack["Ubuntu Docker Stack"]
+        FluentBit["Fluent Bit"]
+        Collector["Collector API"]
+        OpenSearch["OpenSearch<br/>Dashboards"]
+        LogGen["Log Generator"]
+    end
+
+    %% Connections
+    TAPWAN <-->|virtio-net| WAN
+    TAPLAN <-->|virtio-net| LAN
+    BRLAN <-->|bridge| VETHCLIENT
+    VETHCLIENT <-->|veth pair| VETHNS
+    VETHNS -->|DHCP traffic| LAN
+
+    QoSD -->|syslog / forward| FluentBit
+    FluentBit -->|HTTP ingest| Collector
+    FluentBit -->|OpenSearch output| OpenSearch
+    Collector -->|policy polling| QoSD
+    LogGen -->|Forward input| FluentBit
 ```
 
 ### Containers and Data Flow
