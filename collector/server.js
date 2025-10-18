@@ -11,6 +11,7 @@ const http = require('http');
 const url = require('url');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
 const MAX_RECENT_EVENTS = parseInt(process.env.MAX_EVENTS || '200', 10);
@@ -18,6 +19,21 @@ const MAX_RECENT_EVENTS = parseInt(process.env.MAX_EVENTS || '200', 10);
 let policies = {};
 let personaStats = {};
 let recentEvents = [];
+let hostSnapshot = {};
+
+function isPrivateIP(ip) {
+  if (!ip)
+    return false;
+  if (ip.indexOf(':') !== -1) {
+    return ip.toLowerCase().startsWith('fc') ||
+      ip.toLowerCase().startsWith('fd') ||
+      ip.toLowerCase().startsWith('fe80');
+  }
+  return ip.startsWith('10.') ||
+    ip.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip) ||
+    ip.startsWith('169.254.');
+}
 
 function loadPolicies() {
   const policyPath = path.join(__dirname, 'policies.json');
@@ -80,6 +96,143 @@ function updateStats(event) {
   stat.lastSeen = new Date().toISOString();
 }
 
+function ensureHost(ip, mac) {
+  if (!ip || !isPrivateIP(ip))
+    return null;
+  const key = ip;
+  if (!hostSnapshot[key]) {
+    hostSnapshot[key] = {
+      ip,
+      mac: mac || '',
+      persona: 'unknown',
+      priority: 'normal',
+      policy_action: 'observe',
+      dscp: 'CS0',
+      confidence: 0,
+      hostname: '',
+      router: '',
+      rx_bps: 0,
+      tx_bps: 0,
+      sni: '',
+      alpn: '',
+      ja3: '',
+      last_seen: null,
+      source: 'heuristic',
+      last_pushed_persona: '',
+      last_pushed_confidence: 0,
+      last_push_at: 0
+    };
+  }
+  const host = hostSnapshot[key];
+  if (mac && !host.mac)
+    host.mac = mac;
+  return host;
+}
+
+function updateHostSnapshot(event) {
+  if (!event || typeof event !== 'object')
+    return;
+
+  if (event.event === 'qosd_live') {
+    const host = ensureHost(event.ip, event.mac);
+    if (!host)
+      return;
+    host.persona = event.persona || host.persona;
+    host.priority = event.priority || host.priority;
+    host.policy_action = event.policy_action || host.policy_action;
+    host.dscp = event.dscp || host.dscp;
+    host.confidence = event.confidence || host.confidence;
+    host.hostname = event.hostname || host.hostname;
+    host.router = event.router || host.router;
+    host.rx_bps = Number(event.rx_bps || host.rx_bps);
+    host.tx_bps = Number(event.tx_bps || host.tx_bps);
+    host.sni = event.sni || host.sni;
+    host.alpn = event.alpn || host.alpn;
+    host.ja3 = event.ja3 || host.ja3;
+    if (event.last_seen)
+      host.last_seen = event.last_seen;
+    else if (event.timestamp)
+      host.last_seen = Math.floor(Date.parse(event.timestamp) / 1000) || host.last_seen;
+    else
+      host.last_seen = Math.floor(Date.now() / 1000);
+    host.source = 'qosd_live';
+    host.confidence = Number(event.confidence || host.confidence || 0);
+    maybePushOverride(host);
+  } else if (event.event === 'qosd_policy_trace') {
+    const host = ensureHost(event.src, null) || ensureHost(event.dst, null);
+    if (!host)
+      return;
+    if (event.persona)
+      host.persona = event.persona;
+    if (event.priority)
+      host.priority = event.priority;
+    if (event.policy_action)
+      host.policy_action = event.policy_action;
+    if (event.dscp)
+      host.dscp = event.dscp;
+    host.confidence = Math.max(host.confidence, Number(event.observed_confidence || 0));
+    if (event.timestamp)
+      host.last_seen = Math.floor(Date.parse(event.timestamp) / 1000) || host.last_seen;
+    else
+      host.last_seen = Math.floor(Date.now() / 1000);
+    host.source = event.source || 'heuristic';
+    if (event.sni)
+      host.sni = event.sni;
+    if (event.alpn)
+      host.alpn = event.alpn;
+    if (event.ja3)
+      host.ja3 = event.ja3;
+    maybePushOverride(host);
+  }
+}
+
+function snapshotToArray() {
+  return Object.values(hostSnapshot).sort((a, b) => {
+    return (b.rx_bps + b.tx_bps) - (a.rx_bps + a.tx_bps);
+  });
+}
+
+function maybePushOverride(host) {
+  if (!PUSH_OVERRIDES || !host)
+    return;
+
+  if (!host.ip || !host.persona)
+    return;
+
+  const now = Date.now();
+  const personaChanged = host.persona !== host.last_pushed_persona;
+  const confidenceChanged = Math.abs((host.confidence || 0) - (host.last_pushed_confidence || 0)) >= 5;
+  const cooldownExpired = (now - (host.last_push_at || 0)) > 10000;
+
+  if (!personaChanged && !confidenceChanged && !cooldownExpired)
+    return;
+
+  const payload = {
+    ip: host.ip,
+    persona: host.persona,
+    confidence: Math.round(host.confidence || 0)
+  };
+  if (host.priority)
+    payload.priority = host.priority;
+  if (host.policy_action)
+    payload.policy_action = host.policy_action;
+  if (host.dscp)
+    payload.dscp = host.dscp;
+
+  const child = spawn(UBUS_BIN, ['call', 'qosd', 'apply', JSON.stringify(payload)], { stdio: 'ignore' });
+  child.on('error', err => {
+    console.error('[collector] ubus apply error:', err.message);
+  });
+  child.on('close', code => {
+    if (code !== 0)
+      console.error('[collector] ubus apply exited with code', code);
+  });
+
+  host.last_pushed_persona = host.persona;
+  host.last_pushed_confidence = host.confidence || 0;
+  host.last_push_at = now;
+}
+
 function ingestPayload(payload) {
   if (!payload)
     return;
@@ -88,6 +241,7 @@ function ingestPayload(payload) {
 
   items.forEach(item => {
     updateStats(item);
+    updateHostSnapshot(item);
     recentEvents.push(item);
   });
 
@@ -163,6 +317,10 @@ async function handleRequest(req, res) {
     return jsonResponse(res, 200, { personas: personaStats });
   }
 
+  if (req.method === 'GET' && pathname === '/snapshot/lan') {
+    return jsonResponse(res, 200, { hosts: snapshotToArray() });
+  }
+
   if (req.method === 'POST' && pathname === '/ingest') {
     try {
       const payload = await parseRequestBody(req);
@@ -187,3 +345,5 @@ http
   .listen(PORT, '0.0.0.0', () => {
     console.log(`[collector] listening on :${PORT}`);
   });
+const PUSH_OVERRIDES = process.env.QOSD_PUSH_OVERRIDES === '1';
+const UBUS_BIN = process.env.QOSD_UBUS_BIN || 'ubus';

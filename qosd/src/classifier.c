@@ -1,4 +1,7 @@
 #include "classifier.h"
+#include "config.h"
+#include "dpi_signatures.h"
+#include "override_store.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -31,9 +34,63 @@ static void apply_profile(struct persona_result *res, const struct persona_profi
     res->confidence = profile->confidence;
 }
 
+static const struct qosd_config *g_config;
+
+void classifier_set_config(const struct qosd_config *cfg)
+{
+    g_config = cfg;
+}
+
+static void apply_config_override(struct persona_result *res)
+{
+    if (!g_config || !res)
+        return;
+
+    const struct qosd_persona_policy *policy = qosd_config_find_persona(g_config, res->persona);
+    if (!policy)
+        return;
+
+    if (policy->priority[0]) {
+        strncpy(res->priority, policy->priority, sizeof(res->priority) - 1);
+        res->priority[sizeof(res->priority) - 1] = '\0';
+    }
+    if (policy->policy_action[0]) {
+        strncpy(res->policy_action, policy->policy_action, sizeof(res->policy_action) - 1);
+        res->policy_action[sizeof(res->policy_action) - 1] = '\0';
+    }
+    if (policy->dscp[0]) {
+        strncpy(res->dscp, policy->dscp, sizeof(res->dscp) - 1);
+        res->dscp[sizeof(res->dscp) - 1] = '\0';
+    }
+    if (res->confidence < policy->min_confidence)
+        res->confidence = policy->min_confidence;
+}
+
 static int strcasestr_match(const char *haystack, const char *needle)
 {
     return (haystack && needle && *haystack && *needle && strcasestr(haystack, needle) != NULL);
+}
+
+static int streq_nocase(const char *a, const char *b)
+{
+    return (a && b) ? strcasecmp(a, b) == 0 : 0;
+}
+
+static int str_has_token(const char *haystack, const char *token)
+{
+    if (!haystack || !token || !*haystack || !*token)
+        return 0;
+    const char *pos = haystack;
+    size_t tok_len = strlen(token);
+
+    while ((pos = strcasestr(pos, token)) != NULL) {
+        int prefix_ok = (pos == haystack) || pos[-1] == '.' || pos[-1] == '-' || pos[-1] == ' ';
+        int suffix_ok = (pos[tok_len] == '\0') || pos[tok_len] == '.' || pos[tok_len] == '-' || pos[tok_len] == ' ';
+        if (prefix_ok && suffix_ok)
+            return 1;
+        pos += tok_len;
+    }
+    return 0;
 }
 
 static uint16_t to_lower_port(uint16_t port)
@@ -76,8 +133,10 @@ void classify_persona(const struct persona_request *req, struct persona_result *
 
     set_default_result(res);
 
-    if (!req)
+    if (!req) {
+        apply_config_override(res);
         return;
+    }
 
     const char *proto = req->proto ? req->proto : "";
     const char *hostname = req->hostname ? req->hostname : "";
@@ -98,11 +157,32 @@ void classify_persona(const struct persona_request *req, struct persona_result *
         .confidence = res->confidence
     };
 
+    const char *sni = req->sni ? req->sni : "";
+    const char *alpn = req->alpn ? req->alpn : "";
+    const char *ja3 = req->ja3 ? req->ja3 : "";
+
+    struct persona_result sig_res = {0};
+    if (dpi_signature_match(req, &sig_res)) {
+        struct persona_profile sig_profile = {
+            .persona = sig_res.persona,
+            .priority = sig_res.priority,
+            .policy_action = sig_res.policy_action,
+            .dscp = sig_res.dscp,
+            .confidence = sig_res.confidence
+        };
+        apply_profile(res, &sig_profile);
+        apply_config_override(res);
+        return;
+    }
+
     /* Highest confidence buckets first */
     if (strcasestr_match(service_hint, "zoom") ||
         strcasestr_match(service_hint, "meet") ||
         strcasestr_match(service_hint, "teams") ||
+        strcasestr_match(sni, "zoom") ||
+        strcasestr_match(sni, "webex") ||
         strcasestr_match(dns_name, "zoom.us") ||
+        strcasestr_match(alpn, "zoom") ||
         port_in_list(dport, voip_ports, sizeof(voip_ports)/sizeof(voip_ports[0])) ||
         port_in_list(sport, voip_ports, sizeof(voip_ports)/sizeof(voip_ports[0]))) {
 
@@ -113,10 +193,21 @@ void classify_persona(const struct persona_request *req, struct persona_result *
             .dscp = "EF",
             .confidence = 90
         };
+    } else if (str_has_token(ja3, "771,4865-4866-4867-4868-49195-49199")) {
+        profile = (struct persona_profile){
+            .persona = "voip",
+            .priority = "high",
+            .policy_action = "boost",
+            .dscp = "EF",
+            .confidence = 88
+        };
     } else if (strcasestr_match(service_hint, "game") ||
                strcasestr_match(hostname, "ps5") ||
                strcasestr_match(hostname, "xbox") ||
                strcasestr_match(dns_name, "steam") ||
+               strcasestr_match(sni, "playstation") ||
+               strcasestr_match(sni, "xboxlive") ||
+               strcasestr_match(sni, "riotgames") ||
                port_in_list(dport, gaming_ports, sizeof(gaming_ports)/sizeof(gaming_ports[0])) ||
                port_in_list(sport, gaming_ports, sizeof(gaming_ports)/sizeof(gaming_ports[0]))) {
 
@@ -127,11 +218,22 @@ void classify_persona(const struct persona_request *req, struct persona_result *
             .dscp = "CS6",
             .confidence = 85
         };
+    } else if (streq_nocase(alpn, "h3") && (strcasestr_match(sni, "youtube") || strcasestr_match(sni, "ytimg"))) {
+        profile = (struct persona_profile){
+            .persona = "streaming",
+            .priority = "medium",
+            .policy_action = "boost",
+            .dscp = "AF41",
+            .confidence = 82
+        };
     } else if (strcasestr_match(service_hint, "youtube") ||
                strcasestr_match(service_hint, "netflix") ||
                strcasestr_match(service_hint, "prime") ||
                strcasestr_match(dns_name, "netflix") ||
                strcasestr_match(dns_name, "nflxvideo") ||
+               strcasestr_match(sni, "netflix") ||
+               strcasestr_match(sni, "hbomax") ||
+               strcasestr_match(sni, "disneyplus") ||
                port_in_list(dport, streaming_ports, sizeof(streaming_ports)/sizeof(streaming_ports[0]))) {
 
         profile = (struct persona_profile){
@@ -145,6 +247,8 @@ void classify_persona(const struct persona_request *req, struct persona_result *
                strcasestr_match(service_hint, "vpn") ||
                strcasestr_match(dns_name, "microsoft.com") ||
                strcasestr_match(dns_name, "office365") ||
+               strcasestr_match(sni, "teams.microsoft.com") ||
+               strcasestr_match(sni, "zoomgov") ||
                port_in_list(dport, work_ports, sizeof(work_ports)/sizeof(work_ports[0]))) {
 
         profile = (struct persona_profile){
@@ -201,5 +305,33 @@ void classify_persona(const struct persona_request *req, struct persona_result *
         profile.policy_action = "boost";
     }
 
+    if (profile.confidence < 95 && streq_nocase(alpn, "h2")) {
+        profile.confidence += 5;
+        if (profile.confidence > 100)
+            profile.confidence = 100;
+    }
+
+    const struct persona_override *ov_src = override_store_lookup(req->src_ip);
+    const struct persona_override *ov_dst = override_store_lookup(req->dst_ip);
+    const struct persona_override *ov = NULL;
+    if (ov_src && ov_src->persona[0])
+        ov = ov_src;
+    if (ov_dst && ov_dst->persona[0]) {
+        if (!ov || ov_dst->confidence > ov->confidence)
+            ov = ov_dst;
+    }
+
+    if (ov && ov->confidence >= profile.confidence) {
+        struct persona_profile override_profile = {
+            .persona = ov->persona,
+            .priority = ov->priority[0] ? ov->priority : profile.priority,
+            .policy_action = ov->policy_action[0] ? ov->policy_action : profile.policy_action,
+            .dscp = ov->dscp[0] ? ov->dscp : profile.dscp,
+            .confidence = (uint8_t)(ov->confidence > 100.0 ? 100 : (ov->confidence < 0 ? 0 : ov->confidence))
+        };
+        profile = override_profile;
+    }
+
     apply_profile(res, &profile);
+    apply_config_override(res);
 }

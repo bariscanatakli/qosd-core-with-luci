@@ -1,0 +1,120 @@
+<%+header%>
+<h2><%:Dynamic QoS Personas%></h2>
+<p>
+	<%:Classification combines conntrack features (SNI/ALPN/JA3) with policy feedback, following Nichols & Jacobson (2012) and Dong et al. (2019).%>
+</p>
+
+	<div class="table" id="qosd-persona-table">
+		<div class="tr table-titles">
+			<div class="th"><%:Hostname%></div>
+			<div class="th"><%:IP%></div>
+			<div class="th"><%:MAC%></div>
+			<div class="th"><%:Persona%></div>
+			<div class="th"><%:Priority%></div>
+			<div class="th"><%:Policy%></div>
+			<div class="th"><%:Confidence%></div>
+			<div class="th"><%:DSCP%></div>
+			<div class="th"><%:Throughput (Rx/Tx)%></div>
+			<div class="th"><%:SNI%></div>
+			<div class="th"><%:ALPN%></div>
+			<div class="th"><%:JA3%></div>
+			<div class="th"><%:Last Seen%></div>
+			<div class="th"><%:Actions%></div>
+		</div>
+	</div>
+
+<script type="text/javascript">//<![CDATA[
+(function() {
+    const rpc = L.rpc.declare({
+        object: "qosd",
+        method: "live",
+        params: [ "limit" ],
+        expect: { "hosts": "array" }
+    });
+
+    const applyRpc = L.rpc.declare({
+        object: "qosd",
+        method: "apply",
+        params: [ "ip", "persona", "priority", "policy_action", "dscp", "confidence" ]
+    });
+
+	const formatBps = function(v) {
+		if (!v)
+			return "0";
+		if (v >= 1e9)
+			return (v / 1e9).toFixed(2) + " Gbps";
+		if (v >= 1e6)
+			return (v / 1e6).toFixed(2) + " Mbps";
+		if (v >= 1e3)
+			return (v / 1e3).toFixed(2) + " Kbps";
+		return v + " bps";
+	};
+
+	function renderRows(hosts) {
+		const table = document.getElementById("qosd-persona-table");
+		table.querySelectorAll(".tr.data-row").forEach(row => row.remove());
+
+        (hosts || []).forEach(function(host) {
+            const tr = document.createElement("div");
+            tr.className = "tr data-row";
+
+            const cells = [
+                host.hostname || "",
+                host.ip || "",
+                host.mac || "",
+                host.persona || "",
+                host.priority || "",
+                host.policy_action || "",
+                (host.confidence != null ? host.confidence + "%" : ""),
+                host.dscp || "",
+                formatBps(host.rx_bps || 0) + " / " + formatBps(host.tx_bps || 0),
+                host.sni || "",
+                host.alpn || "",
+                host.ja3 || "",
+                host.last_seen ? new Date(host.last_seen * 1000).toISOString() : ""
+            ];
+
+            cells.forEach(function(value) {
+                const td = document.createElement("div");
+                td.className = "td";
+                td.textContent = value;
+                tr.appendChild(td);
+            });
+
+            const actionTd = document.createElement("div");
+            actionTd.className = "td";
+
+            const makeButton = function(label, persona, priority, policy, dscp) {
+                const btn = document.createElement("button");
+                btn.className = "btn cbi-button-action";
+                btn.textContent = label;
+                btn.addEventListener("click", function(ev) {
+                    ev.preventDefault();
+                    applyRpc(host.ip, persona, priority, policy, dscp, Math.max(host.confidence || 0, 80)).then(refresh);
+                });
+                return btn;
+            };
+
+            actionTd.appendChild(makeButton("Boost", "work", "high", "boost", "EF"));
+            actionTd.appendChild(makeButton("Throttle", "bulk", "low", "throttle", "CS1"));
+            actionTd.appendChild(makeButton("Observe", "other", "normal", "observe", "CS0"));
+
+            tr.appendChild(actionTd);
+
+            table.appendChild(tr);
+        });
+    }
+
+	function refresh() {
+		rpc({ limit: 128 }).then(function(res) {
+			renderRows(res && res.hosts ? res.hosts : []);
+		}).catch(function(err) {
+			console.error("qosd live fetch failed", err);
+		});
+	}
+
+	refresh();
+	window.setInterval(refresh, 3000);
+})();
+//]]></script>
+<%+footer%>

@@ -13,8 +13,10 @@
 #include <libubox/blobmsg.h>
 #include <syslog.h>
 #include <inttypes.h>
+#include <arpa/inet.h>
 
 #include "classifier.h"
+#include "override_store.h"
 
 #define MAX_HOSTS 1024
 #define LEASES_FILE "/tmp/dhcp.leases"
@@ -34,6 +36,9 @@ struct host_stat {
     char policy_action[32];
     char dscp[16];
     uint8_t confidence;
+    char sni[128];
+    char alpn[64];
+    char ja3[64];
 
     uint64_t cur_rx_bytes;
     uint64_t cur_tx_bytes;
@@ -96,6 +101,48 @@ static void json_escape(const char *in, char *out, size_t out_len)
         }
     }
     out[oi] = '\0';
+}
+
+static bool is_private_v4(uint32_t addr)
+{
+    if ((addr & 0xff000000U) == 0x0a000000U)
+        return true; /* 10/8 */
+    if ((addr & 0xfff00000U) == 0xac100000U)
+        return true; /* 172.16/12 */
+    if ((addr & 0xffff0000U) == 0xc0a80000U)
+        return true; /* 192.168/16 */
+    if ((addr & 0xffff0000U) == 0xa9fe0000U)
+        return true; /* 169.254/16 link local */
+    return false;
+}
+
+static bool is_local_v6(const struct in6_addr *addr6)
+{
+    if (!addr6)
+        return false;
+    /* Unique local (fc00::/7) or link-local (fe80::/10) */
+    if ((addr6->s6_addr[0] & 0xfe) == 0xfc)
+        return true;
+    if (addr6->s6_addr[0] == 0xfe && (addr6->s6_addr[1] & 0xc0) == 0x80)
+        return true;
+    return false;
+}
+
+static bool is_lan_ip(const char *ip)
+{
+    if (!ip || !*ip)
+        return false;
+    if (strchr(ip, ':')) {
+        struct in6_addr addr6;
+        if (inet_pton(AF_INET6, ip, &addr6) != 1)
+            return false;
+        return is_local_v6(&addr6);
+    }
+
+    struct in_addr addr4;
+    if (inet_pton(AF_INET, ip, &addr4) != 1)
+        return false;
+    return is_private_v4(ntohl(addr4.s_addr));
 }
 
 static inline int find_host_idx(const char *ip, bool create)
@@ -167,6 +214,9 @@ static void reset_current_counters(void)
         g_hosts[i].priority[0] = '\0';
         g_hosts[i].policy_action[0] = '\0';
         g_hosts[i].dscp[0] = '\0';
+        g_hosts[i].sni[0] = '\0';
+        g_hosts[i].alpn[0] = '\0';
+        g_hosts[i].ja3[0] = '\0';
         g_hosts[i].confidence = 0;
     }
 }
@@ -182,6 +232,9 @@ static void sample_nfconntrack(void)
         char *p = line;
         char src[64] = {0}, dst[64] = {0};
         char proto[16] = {0};
+        char sni[128] = {0};
+        char alpn[64] = {0};
+        char ja3[64] = {0};
         uint64_t orig_bytes = 0, reply_bytes = 0;
         uint16_t sport = 0, dport = 0;
 
@@ -214,22 +267,76 @@ static void sample_nfconntrack(void)
             }
         }
 
+        char *sni_ptr = strstr(p, "sni=");
+        if (sni_ptr) {
+            sni_ptr += 4;
+            sscanf(sni_ptr, "%127[^ ]", sni);
+            size_t len = strlen(sni);
+            if (len && (sni[len - 1] == ',' || sni[len - 1] == ';'))
+                sni[len - 1] = '\0';
+        }
+
+        char *alpn_ptr = strstr(p, "alpn=");
+        if (alpn_ptr) {
+            alpn_ptr += 5;
+            sscanf(alpn_ptr, "%63[^ ]", alpn);
+            size_t len = strlen(alpn);
+            if (len && (alpn[len - 1] == ',' || alpn[len - 1] == ';'))
+                alpn[len - 1] = '\0';
+        }
+
+        char *ja3_ptr = strstr(p, "ja3=");
+        if (ja3_ptr) {
+            ja3_ptr += 4;
+            sscanf(ja3_ptr, "%63[^ ]", ja3);
+            size_t len = strlen(ja3);
+            if (len && (ja3[len - 1] == ',' || ja3[len - 1] == ';'))
+                ja3[len - 1] = '\0';
+        }
+
         if (src[0]) {
+            if (!is_lan_ip(src))
+                goto update_dst;
             int is = find_host_idx(src, true);
             if (is >= 0) {
                 struct host_stat *h = &g_hosts[is];
                 h->cur_tx_bytes += orig_bytes;
                 h->last_seen = time(NULL);
+                if (sni[0]) {
+                    strncpy(h->sni, sni, sizeof(h->sni) - 1);
+                    h->sni[sizeof(h->sni) - 1] = '\0';
+                }
+                if (alpn[0]) {
+                    strncpy(h->alpn, alpn, sizeof(h->alpn) - 1);
+                    h->alpn[sizeof(h->alpn) - 1] = '\0';
+                }
+                if (ja3[0]) {
+                    strncpy(h->ja3, ja3, sizeof(h->ja3) - 1);
+                    h->ja3[sizeof(h->ja3) - 1] = '\0';
+                }
 
                 struct persona_request req = {
                     .proto = proto,
                     .src_port = sport,
                     .dst_port = dport,
+                    .src_ip = src,
+                    .dst_ip = dst,
                     .hostname = h->hostname[0] ? h->hostname : NULL,
+                    .sni = h->sni[0] ? h->sni : (sni[0] ? sni : NULL),
+                    .alpn = h->alpn[0] ? h->alpn : (alpn[0] ? alpn : NULL),
+                    .ja3 = h->ja3[0] ? h->ja3 : (ja3[0] ? ja3 : NULL),
                     .bytes_total = orig_bytes + reply_bytes,
                 };
                 struct persona_result res = {0};
                 classify_persona(&req, &res);
+                const struct persona_override *ov = override_store_lookup(src);
+                if (ov && ov->persona[0] && ov->confidence >= res.confidence) {
+                    strncpy(res.persona, ov->persona, sizeof(res.persona) - 1);
+                    strncpy(res.priority, ov->priority, sizeof(res.priority) - 1);
+                    strncpy(res.policy_action, ov->policy_action, sizeof(res.policy_action) - 1);
+                    strncpy(res.dscp, ov->dscp, sizeof(res.dscp) - 1);
+                    res.confidence = (uint8_t)(ov->confidence > 100.0 ? 100 : (ov->confidence < 0 ? 0 : ov->confidence));
+                }
                 if (res.confidence >= h->confidence) {
                     strncpy(h->persona, res.persona, sizeof(h->persona) - 1);
                     strncpy(h->priority, res.priority, sizeof(h->priority) - 1);
@@ -243,22 +350,50 @@ static void sample_nfconntrack(void)
                 }
             }
         }
+update_dst:
         if (dst[0]) {
+            if (!is_lan_ip(dst))
+                continue;
             int id = find_host_idx(dst, true);
             if (id >= 0) {
                 struct host_stat *h = &g_hosts[id];
                 h->cur_rx_bytes += reply_bytes;
                 h->last_seen = time(NULL);
+                if (sni[0]) {
+                    strncpy(h->sni, sni, sizeof(h->sni) - 1);
+                    h->sni[sizeof(h->sni) - 1] = '\0';
+                }
+                if (alpn[0]) {
+                    strncpy(h->alpn, alpn, sizeof(h->alpn) - 1);
+                    h->alpn[sizeof(h->alpn) - 1] = '\0';
+                }
+                if (ja3[0]) {
+                    strncpy(h->ja3, ja3, sizeof(h->ja3) - 1);
+                    h->ja3[sizeof(h->ja3) - 1] = '\0';
+                }
 
                 struct persona_request req = {
                     .proto = proto,
                     .src_port = sport,
                     .dst_port = dport,
+                    .src_ip = src,
+                    .dst_ip = dst,
                     .hostname = h->hostname[0] ? h->hostname : NULL,
+                    .sni = h->sni[0] ? h->sni : (sni[0] ? sni : NULL),
+                    .alpn = h->alpn[0] ? h->alpn : (alpn[0] ? alpn : NULL),
+                    .ja3 = h->ja3[0] ? h->ja3 : (ja3[0] ? ja3 : NULL),
                     .bytes_total = orig_bytes + reply_bytes,
                 };
                 struct persona_result res = {0};
                 classify_persona(&req, &res);
+                const struct persona_override *ov = override_store_lookup(dst);
+                if (ov && ov->persona[0] && ov->confidence >= res.confidence) {
+                    strncpy(res.persona, ov->persona, sizeof(res.persona) - 1);
+                    strncpy(res.priority, ov->priority, sizeof(res.priority) - 1);
+                    strncpy(res.policy_action, ov->policy_action, sizeof(res.policy_action) - 1);
+                    strncpy(res.dscp, ov->dscp, sizeof(res.dscp) - 1);
+                    res.confidence = (uint8_t)(ov->confidence > 100.0 ? 100 : (ov->confidence < 0 ? 0 : ov->confidence));
+                }
                 if (res.confidence >= h->confidence) {
                     strncpy(h->persona, res.persona, sizeof(h->persona) - 1);
                     strncpy(h->priority, res.priority, sizeof(h->priority) - 1);
@@ -351,6 +486,9 @@ static void log_live_snapshot(const struct host_stat *h)
     const char *policy = h->policy_action[0] ? h->policy_action : "";
     const char *dscp = h->dscp[0] ? h->dscp : "";
     const char *router = router_id();
+    const char *sni = h->sni[0] ? h->sni : "";
+    const char *alpn = h->alpn[0] ? h->alpn : "";
+    const char *ja3 = h->ja3[0] ? h->ja3 : "";
 
     char host_esc[128];
     char ip_esc[80];
@@ -361,6 +499,9 @@ static void log_live_snapshot(const struct host_stat *h)
     char dscp_esc[32];
     char router_esc[64];
     char seen_esc[40];
+    char sni_esc[160];
+    char alpn_esc[64];
+    char ja3_esc[96];
 
     json_escape(hostname, host_esc, sizeof(host_esc));
     json_escape(ip, ip_esc, sizeof(ip_esc));
@@ -371,6 +512,9 @@ static void log_live_snapshot(const struct host_stat *h)
     json_escape(dscp, dscp_esc, sizeof(dscp_esc));
     json_escape(router, router_esc, sizeof(router_esc));
     json_escape(ts_seen, seen_esc, sizeof(seen_esc));
+    json_escape(sni, sni_esc, sizeof(sni_esc));
+    json_escape(alpn, alpn_esc, sizeof(alpn_esc));
+    json_escape(ja3, ja3_esc, sizeof(ja3_esc));
 
     char payload[1024];
     snprintf(payload, sizeof(payload),
@@ -378,10 +522,11 @@ static void log_live_snapshot(const struct host_stat *h)
              "\"ip\":\"%s\",\"mac\":\"%s\",\"persona\":\"%s\",\"priority\":\"%s\","
              "\"policy_action\":\"%s\",\"dscp\":\"%s\",\"confidence\":%u,"
              "\"rx_bps\":%" PRIu64 ",\"tx_bps\":%" PRIu64 ",\"last_seen\":\"%s\","
-             "\"router\":\"%s\"}",
+             "\"router\":\"%s\",\"sni\":\"%s\",\"alpn\":\"%s\",\"ja3\":\"%s\"}",
              ts_now, host_esc, ip_esc, mac_esc, persona_esc, pri_esc,
              policy_esc, dscp_esc, h->confidence,
-             h->rx_bps, h->tx_bps, seen_esc, router_esc);
+             h->rx_bps, h->tx_bps, seen_esc, router_esc,
+             sni_esc, alpn_esc, ja3_esc);
     syslog(LOG_INFO, "%s", payload);
 }
 
@@ -428,6 +573,9 @@ int qosd_live_handler(struct ubus_context *ctx, struct ubus_object *obj,
         blobmsg_add_u64(&b, "tx_bps", h->tx_bps);
         blobmsg_add_u32(&b, "last_seen", (uint32_t)h->last_seen);
         blobmsg_add_u32(&b, "confidence", h->confidence);
+        blobmsg_add_string(&b, "sni", h->sni[0] ? h->sni : "");
+        blobmsg_add_string(&b, "alpn", h->alpn[0] ? h->alpn : "");
+        blobmsg_add_string(&b, "ja3", h->ja3[0] ? h->ja3 : "");
         blobmsg_close_table(&b, t);
 
         log_live_snapshot(h);
