@@ -11,6 +11,7 @@ const http = require('http');
 const url = require('url');
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 const { spawn } = require('child_process');
 
 const PORT = parseInt(process.env.PORT || '4000', 10);
@@ -20,6 +21,29 @@ let policies = {};
 let personaStats = {};
 let recentEvents = [];
 let hostSnapshot = {};
+const APP_PROTO_PERSONA = {
+  netflix: 'streaming',
+  youtube: 'streaming',
+  'youtube-video': 'streaming',
+  'amazon-video': 'streaming',
+  disney_plus: 'streaming',
+  hulu: 'streaming',
+  quic: 'streaming',
+  zoom: 'voip',
+  webex: 'voip',
+  teams: 'voip',
+  skype: 'voip',
+  discord: 'voip',
+  slack: 'work',
+  office365: 'work',
+  ms_office365: 'work',
+  vpn: 'work',
+  steam: 'gaming',
+  'blizzard-battle.net': 'gaming',
+  riot: 'gaming',
+  psn: 'gaming',
+  xboxlive: 'gaming'
+};
 
 function isPrivateIP(ip) {
   if (!ip)
@@ -347,3 +371,69 @@ http
   });
 const PUSH_OVERRIDES = process.env.QOSD_PUSH_OVERRIDES === '1';
 const UBUS_BIN = process.env.QOSD_UBUS_BIN || 'ubus';
+const SURICATA_EVE_PATH = process.env.SURICATA_EVE_PATH || '';
+const SURICATA_ENABLED = SURICATA_EVE_PATH.length > 0;
+
+function processSuricataRecord(record) {
+  if (!record || record.event_type !== 'app-layer')
+    return;
+
+  const proto = (record.app_proto || '').toLowerCase();
+  if (!proto)
+    return;
+
+  const persona = APP_PROTO_PERSONA[proto];
+  if (!persona)
+    return;
+
+  const ip = isPrivateIP(record.src_ip) ? record.src_ip :
+    (isPrivateIP(record.dest_ip) ? record.dest_ip : null);
+  if (!ip)
+    return;
+
+  const host = ensureHost(ip, null);
+  if (!host)
+    return;
+
+  host.persona = persona;
+  host.source = 'suricata';
+  host.confidence = Math.max(host.confidence, 90);
+  host.last_seen = Math.floor(Date.now() / 1000);
+  maybePushOverride(host);
+}
+
+function startSuricataTail() {
+  if (!SURICATA_ENABLED) {
+    console.log('[collector] SURICATA_EVE_PATH not set, DPI integration disabled');
+    return;
+  }
+
+  const args = ['-n0', '-F', SURICATA_EVE_PATH];
+  const tail = spawn('tail', args);
+  tail.on('error', err => {
+    console.error('[collector] Failed to tail Suricata logs:', err.message);
+  });
+  tail.on('close', code => {
+    console.warn(`[collector] Suricata tail exited with code ${code}, retrying in 5s`);
+    setTimeout(startSuricataTail, 5000);
+  });
+
+  const rl = readline.createInterface({ input: tail.stdout });
+  rl.on('line', line => {
+    line = line.trim();
+    if (!line)
+      return;
+    try {
+      const record = JSON.parse(line);
+      processSuricataRecord(record);
+    } catch (err) {
+      console.warn('[collector] Failed to parse Suricata EVE line:', err.message);
+    }
+  });
+  rl.on('error', err => {
+    console.error('[collector] Suricata readline error:', err.message);
+  });
+}
+
+if (SURICATA_ENABLED)
+  startSuricataTail();

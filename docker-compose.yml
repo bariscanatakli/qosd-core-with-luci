@@ -84,8 +84,10 @@ services:
     working_dir: /app
     environment:
       - PORT=4000
+      - SURICATA_EVE_PATH=/opt/suricata/logs/eve.json
     volumes:
       - ./collector:/app:ro
+      - ./suricata/logs:/opt/suricata/logs:ro
     command: ["node", "server.js"]
     ports:
       - "4000:4000"
@@ -122,6 +124,19 @@ services:
     mem_limit: 64m
     networks:
       - telemetry
+
+  suricata:
+    image: jasonish/suricata:latest
+    container_name: suricata
+    restart: unless-stopped
+    network_mode: "host"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./suricata/config/suricata.yaml:/etc/suricata/suricata.yaml:ro
+      - ./suricata/logs:/var/log/suricata
+    command: ["-c", "/etc/suricata/suricata.yaml", "-i", "any"]
 
 volumes:
   opensearch-data:

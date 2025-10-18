@@ -67,6 +67,7 @@ flowchart LR
 | `opensearch-dashboards` | Visual analytics workspace | `5601` | Pre-configured to trust the local OpenSearch node. |
 | `fluent-bit` | Ingestion and enrichment gateway | `24224`, `24224/udp`, `5514/udp`, `2020` | Accepts Fluent Forward streams and legacy syslog, then enriches and forwards to OpenSearch. |
 | `collector-api` | Receives Fluent Bit HTTP output, keeps persona telemetry, serves policy endpoints | `4000` | Stateless Node.js service with in-memory policy store; QoSD polls `/policy/<persona>`. |
+| `suricata` | DPI engine (GPLv3) identifying application protocols | host network | Emits `eve.json` with `app_proto` fields; collector consumes these to override personas via ubus. |
 | `log-generator` | Synthetic workload (can be replaced by OpenWrt) | — | Emits JSON logs for functional tests. |
 
 Each service has a restart policy of `unless-stopped`, integrates with the named Docker network `telemetry_observability`, and enforces memory ceilings (768 MB for OpenSearch, 512 MB for Dashboards/Fluent Bit, 64 MB for the generator). Health checks confirm readiness before dependent services start.
@@ -120,6 +121,33 @@ The lightweight collector (`collector-api`) closes the loop between Fluent Bit t
 - `GET /health` – Simple readiness check used by Docker Compose.
 
 QoSD nodes can poll the policy endpoint periodically (e.g., via cron or an ubus worker) to align local enforcement with collector insights.
+
+---
+
+## Suricata DPI Service
+
+Suricata (GPLv3) runs alongside the collector inside Docker Compose to extract application metadata (e.g., Zoom, Netflix) without burdening the OpenWrt router:
+
+1. **Configuration & Logs**
+   - `suricata/config/suricata.yaml` enables EVE app-layer output.
+   - Logs are written to `suricata/logs/eve.json` and mounted read-only into the collector container.
+
+2. **Collector Integration**
+   - `collector/server.js` tails `SURICATA_EVE_PATH` (default `/opt/suricata/logs/eve.json`), maps `app_proto` values to personas, and pushes overrides back to QoSD with `ubus call qosd apply`.
+   - To allow automated overrides, set `QOSD_PUSH_OVERRIDES=1` and ensure the collector host can reach the router’s `ubus` socket (e.g., via SSH port-forwarding).
+
+3. **Running Suricata**
+
+   ```bash
+   mkdir -p suricata/logs
+   docker-compose up -d suricata collector-api fluent-bit opensearch-node
+   ```
+
+   With `network_mode: host`, Suricata inspects traffic on `any` interface. Adapt the interface or capture method to match your lab topology.
+
+4. **OpenWrt Impact**
+   - No additional packages are required on the router when Suricata runs in Docker; QoSD simply receives richer persona hints via overrides.
+   - If you prefer running DPI on the router itself, cross-compile nDPI/Suricata using the OpenWrt SDK and adjust QoSD’s build accordingly.
 
 ---
 
